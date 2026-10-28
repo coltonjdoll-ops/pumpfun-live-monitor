@@ -5,7 +5,9 @@ from fastapi.responses import HTMLResponse
 import websocket
 from engine import Token,assess,update_trade,read_cap
 
-FEED=os.getenv("PUMP_FEED_URL","wss://pumpdev.io/ws")
+FEED = os.getenv("PUMP_FEED_URL") or (
+    "wss://pumpdev.io/ws?api-key=" + os.getenv("PUMPDEV_API_KEY", "")
+)
 MAX_SUBS=5
 WINDOW=35
 MAX_TOKENS=1200
