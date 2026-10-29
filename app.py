@@ -8,7 +8,7 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="solana-rpc-ready-v1"
+SCANNER_VERSION="solana-v1-transaction-fix"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
 PRIVATE_RPC_CONFIGURED=bool(os.getenv("SOLANA_RPC_URL"))
@@ -132,7 +132,7 @@ def transaction_decoder():
             last_request=time.monotonic()
             payload=json.dumps({"jsonrpc":"2.0","id":1,"method":"getTransaction",
                 "params":[sig,{"encoding":"jsonParsed","commitment":"confirmed",
-                "maxSupportedTransactionVersion":0}]}).encode()
+                "maxSupportedTransactionVersion":1}]}).encode()
             req=urllib.request.Request(SOLANA_RPC_URL,data=payload,
                 headers={"Content-Type":"application/json"})
             with urllib.request.urlopen(req,timeout=9) as response:
