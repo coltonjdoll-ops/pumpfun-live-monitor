@@ -8,9 +8,11 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="solana-trade-decoder-v3"
+SCANNER_VERSION="solana-rpc-ready-v1"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
+PRIVATE_RPC_CONFIGURED=bool(os.getenv("SOLANA_RPC_URL"))
+PRIVATE_WS_CONFIGURED=bool(os.getenv("SOLANA_WS_URL"))
 transaction_queue=queue.Queue(maxsize=100)
 seen_signatures=set()
 RPC_MIN_INTERVAL=float(os.getenv("SOLANA_RPC_MIN_INTERVAL","1.0"))
@@ -135,6 +137,8 @@ def transaction_decoder():
                 headers={"Content-Type":"application/json"})
             with urllib.request.urlopen(req,timeout=9) as response:
                 data=json.load(response)
+            if data.get("error"):
+                raise RuntimeError("RPC returned error code "+str(data["error"].get("code","unknown")))
             backoff=0
             tx=data.get("result")
             if not tx or not tx.get("meta") or tx["meta"].get("err"):continue
@@ -262,7 +266,7 @@ def summary(t,now):
 
 @app.get("/api/status")
 def get_status():
-    with lock:return {**status,"scanner_version":SCANNER_VERSION,"active_subscriptions":len(active),"subscription_limit":MAX_SUBS,"tracked_tokens":len(tokens),"server_time":time.time(),
+    with lock:return {**status,"scanner_version":SCANNER_VERSION,"private_rpc_configured":PRIVATE_RPC_CONFIGURED,"private_ws_configured":PRIVATE_WS_CONFIGURED,"transaction_queue_depth":transaction_queue.qsize(),"active_subscriptions":len(active),"subscription_limit":MAX_SUBS,"tracked_tokens":len(tokens),"server_time":time.time(),
        "limitations":["No complete trade coverage","No verified unique humans","No live X feed","No prediction guarantee"]}
 
 @app.get("/api/live")
