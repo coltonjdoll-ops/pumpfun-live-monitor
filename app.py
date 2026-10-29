@@ -8,10 +8,11 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="solana-trade-decoder-v2"
+SCANNER_VERSION="solana-trade-decoder-v3"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
 transaction_queue=queue.Queue(maxsize=100)
+seen_signatures=set()
 RPC_MIN_INTERVAL=float(os.getenv("SOLANA_RPC_MIN_INTERVAL","1.0"))
 PUMP_PROGRAM_ID="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 WINDOW=35
@@ -202,9 +203,15 @@ def onchain_observer():
                         with lock:
                             status["onchain_transactions_seen"]+=1
                             logs=value.get("logs") or []
+                            # RPC logs don't identify the traded mint reliably; skip duplicates
+                            # and avoid building an unbounded backlog of stale candidates.
                             if any("Instruction: Buy" in line or "Instruction: Sell" in line for line in logs):
-                                try:transaction_queue.put_nowait(value["signature"])
-                                except queue.Full:status["onchain_queue_dropped"]+=1
+                                signature=value["signature"]
+                                if signature not in seen_signatures:
+                                    seen_signatures.add(signature)
+                                    if len(seen_signatures)>10000:seen_signatures.clear()
+                                    try:transaction_queue.put_nowait(signature)
+                                    except queue.Full:status["onchain_queue_dropped"]+=1
                             logs=value.get("logs") or []
                             if any("Instruction: Buy" in line for line in logs):
                                 status["onchain_buy_log_candidates"]+=1
