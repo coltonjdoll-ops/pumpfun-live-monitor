@@ -99,6 +99,8 @@ def assess(token,now=None):
     else:confidence="VERY LOW"
     if risk:label="RISK FLAG"
     elif total==0:label="NO TRADE DATA"
+    elif age<=45 and len(buys)>=3 and buyers>=3 and ratio is not None and ratio>=.75 and buy_volume>sell_volume:
+        label="EARLY WATCH"
     elif confidence=="MODERATE" and score>=70 and ratio is not None and ratio>=.7:
         label="EARLY SIGNAL"
     elif total>=3:label="BUILDING"
