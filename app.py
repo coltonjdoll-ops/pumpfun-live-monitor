@@ -8,6 +8,7 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
+SCANNER_VERSION="solana-observer-v2"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 PUMP_PROGRAM_ID="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 WINDOW=35
@@ -172,7 +173,7 @@ def summary(t,now):
 
 @app.get("/api/status")
 def get_status():
-    with lock:return {**status,"active_subscriptions":len(active),"subscription_limit":MAX_SUBS,"tracked_tokens":len(tokens),"server_time":time.time(),
+    with lock:return {**status,"scanner_version":SCANNER_VERSION,"active_subscriptions":len(active),"subscription_limit":MAX_SUBS,"tracked_tokens":len(tokens),"server_time":time.time(),
        "limitations":["No complete trade coverage","No verified unique humans","No live X feed","No prediction guarantee"]}
 
 @app.get("/api/live")
