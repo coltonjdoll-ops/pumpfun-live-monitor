@@ -69,28 +69,47 @@ def assess(token,now=None):
     total=len(recent)
     ratio=len(buys)/total if total else None
     creator_sells=sum(x[2] or 0 for x in sells if x[3] and x[3]==token.creator)
-    # Only score evidence that was actually observed, never assume zero activity if feed unavailable.
-    score=0; positives=[]
-    if len(wallets)>=5:score+=25;positives.append("5+ distinct observed non-creator buying wallets")
-    if len(wallets)>=10:score+=15;positives.append("10+ distinct observed buying wallets")
-    if total>=8 and ratio is not None and ratio>=.7:score+=20;positives.append("70%+ observed buy transactions")
-    if len(valid_amounts)>=6 and volume>=2:score+=20;positives.append("2+ SOL observed turnover")
-    if cap_change is not None and cap_change>=8:score+=20;positives.append("8%+ observed cap increase")
-    risk=[]
-    if creator_sells>=.5:risk.append("Creator sold >=0.5 SOL in observed window")
-    if total>=8 and ratio is not None and ratio<.35:risk.append("Under 35% buys in observed window")
-    if cap_change is not None and cap_change<=-15:risk.append("Observed cap drop >=15%")
+    # Evidence-weighted research ranking; not a calibrated probability of profit.
+    score=0;positives=[];risk=[]
+    buyers=len(wallets)
+    if buyers>=5:score+=20;positives.append("5+ distinct non-creator buyers")
+    if buyers>=10:score+=15;positives.append("10+ distinct non-creator buyers")
+    if total>=8 and ratio is not None and ratio>=.70:
+        score+=15;positives.append("70%+ observed buys")
+    if len(valid_amounts)>=6 and volume>=2:
+        score+=15;positives.append("2+ SOL observed turnover")
+    if cap_change is not None and cap_change>=8:
+        score+=15;positives.append("8%+ observed cap increase")
+    if buy_volume>=1 and buy_volume>sell_volume*2 and len(valid_amounts)>=6:
+        score+=10;positives.append("buy volume exceeds sell volume 2:1")
+    if total>=8 and buyers>=5 and buyers/max(1,len(buys))>=.6:
+        score+=10;positives.append("buy activity distributed across wallets")
+    if creator_sells>=.5:risk.append("Creator sold 0.5+ SOL in observed window")
+    if total>=8 and ratio is not None and ratio<.35:risk.append("Under 35% observed buys")
+    if cap_change is not None and cap_change<=-15:risk.append("Observed cap drop 15%+")
+    if len(buys)>=8 and buyers<=2:risk.append("Buying concentrated in 1-2 wallets")
+    if len(valid_amounts)>=6 and volume>0:
+        largest=max((x[2] or 0) for x in recent)
+        if largest/volume>.75:risk.append("Single trade dominates observed volume")
+    if risk:score=min(score,20)
+    score=max(0,min(100,score))
+    # Confidence measures sample sufficiency, not market direction or feed completeness.
+    if total>=20 and buyers>=10 and len(valid_amounts)>=12:confidence="MODERATE"
+    elif total>=8 and buyers>=5 and len(valid_amounts)>=5:confidence="LOW"
+    else:confidence="VERY LOW"
     if risk:label="RISK FLAG"
     elif total==0:label="NO TRADE DATA"
-    elif len(wallets)>=5 and total>=8 and ratio is not None and ratio>=.7 and score>=60:label="EARLY SIGNAL"
+    elif confidence=="MODERATE" and score>=70 and ratio is not None and ratio>=.7:
+        label="EARLY SIGNAL"
     elif total>=3:label="BUILDING"
     else:label="INSUFFICIENT"
     token.score=score;token.label=label
     token.reason="; ".join(risk or positives) or "Not enough observed evidence"
-    return dict(age=age,score=score,label=label,buys=len(buys),sells=len(sells),
-                wallets=len(wallets),volume=volume,volume_samples=len(valid_amounts),
-                buy_volume=buy_volume,sell_volume=sell_volume,cap_change=cap_change,
-                reason=token.reason,coverage="observed subscribed feed only")
+    return dict(age=age,score=score,label=label,confidence=confidence,
+                buys=len(buys),sells=len(sells),wallets=buyers,volume=volume,
+                volume_samples=len(valid_amounts),buy_volume=buy_volume,
+                sell_volume=sell_volume,cap_change=cap_change,
+                reason=token.reason,coverage="incomplete observed feed; no outcome calibration")
 
 def db_open(path):
     db=sqlite3.connect(path)
