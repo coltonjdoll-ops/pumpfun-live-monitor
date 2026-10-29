@@ -5,9 +5,8 @@ from fastapi.responses import HTMLResponse
 import websocket
 from engine import Token,assess,update_trade,read_cap
 
-FEED = os.getenv("PUMP_FEED_URL") or (
-    "wss://pumpdev.io/ws?api-key=" + os.getenv("PUMPDEV_API_KEY", "")
-)
+FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
+API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=5
 WINDOW=35
 MAX_TOKENS=1200
@@ -15,7 +14,7 @@ lock=threading.RLock()
 tokens={}
 order=collections.deque()
 active=set()
-status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":FEED,"reconnects":0,"coverage":"up to five simultaneously subscribed tokens; incomplete"}
+status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"up to five simultaneously subscribed tokens; incomplete"}
 stopping=threading.Event()
 ws_holder=[None]
 
@@ -43,6 +42,15 @@ def ingest(e,ws):
     now=time.time()
     with lock:
         status["last_message_at"]=now
+        if e.get("type")=="auth":
+            status["auth_status"]=str(e.get("status") or "unknown")
+            status["auth_tier"]=str(e.get("tier") or "")[:40] or None
+            if e.get("status")=="ok":
+                ws.send(json.dumps({"method":"subscribeNewToken"}))
+                rebalance(ws,now)
+            else:
+                status["last_error"]="Feed authentication was not accepted: "+str(e.get("reason") or e.get("status"))[:100]
+            return
         if e.get("type")=="error":
             status["last_error"]=str(e.get("message") or e.get("code") or e)[:180]
             return
@@ -70,8 +78,12 @@ def feed_loop():
                 with lock:
                     ws_holder[0]=ws;status["connected"]=True;status["last_error"]=None
                     active.clear()
-                ws.send(json.dumps({"method":"subscribeNewToken"}))
-                rebalance(ws,time.time())
+                    status["auth_status"]="pending" if API_KEY else "anonymous"
+                if API_KEY:
+                    ws.send(json.dumps({"method":"auth","key":API_KEY}))
+                else:
+                    ws.send(json.dumps({"method":"subscribeNewToken"}))
+                    rebalance(ws,time.time())
             def message(ws,raw):
                 try:ingest(json.loads(raw),ws)
                 except Exception as ex:
@@ -85,7 +97,8 @@ def feed_loop():
                 while not stopping.wait(1):
                     with lock:
                         if ws_holder[0] is not ws:break
-                        rebalance(ws,time.time())
+                        if status["auth_status"] in ("ok","anonymous"):
+                            rebalance(ws,time.time())
             threading.Thread(target=rotation,daemon=True).start()
             ws.run_forever(ping_interval=25,ping_timeout=10)
         except Exception as ex:
