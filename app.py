@@ -1,4 +1,4 @@
-import os,time,json,threading,asyncio,collections
+import os,time,json,threading,asyncio,collections,urllib.request,queue
 from contextlib import asynccontextmanager
 from fastapi import FastAPI,HTTPException,Query
 from fastapi.responses import HTMLResponse
@@ -8,8 +8,10 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="solana-observer-v3"
+SCANNER_VERSION="solana-trade-decoder-v1"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
+SOLANA_RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
+transaction_queue=queue.Queue(maxsize=300)
 PUMP_PROGRAM_ID="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 WINDOW=35
 MAX_TOKENS=1200
@@ -17,7 +19,7 @@ lock=threading.RLock()
 tokens={}
 order=collections.deque()
 active=set()
-status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_buy_log_candidates":0,"onchain_sell_log_candidates":0,"onchain_last_error":None,"onchain_last_message_at":None}
+status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_buy_log_candidates":0,"onchain_sell_log_candidates":0,"onchain_decoded_trades":0,"onchain_rpc_errors":0,"onchain_last_error":None,"onchain_last_message_at":None}
 stopping=threading.Event()
 ws_holder=[None]
 
@@ -111,6 +113,62 @@ def feed_loop():
         if stopping.wait(delay):break
         delay=min(30,delay*1.5)
 
+def transaction_decoder():
+    """Decode observed Pump.fun token transfers and wallet SOL changes from RPC metadata."""
+    while not stopping.is_set():
+        try:
+            sig=transaction_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            payload=json.dumps({"jsonrpc":"2.0","id":1,"method":"getTransaction",
+                "params":[sig,{"encoding":"jsonParsed","commitment":"confirmed",
+                "maxSupportedTransactionVersion":0}]}).encode()
+            req=urllib.request.Request(SOLANA_RPC_URL,data=payload,
+                headers={"Content-Type":"application/json"})
+            with urllib.request.urlopen(req,timeout=9) as response:
+                data=json.load(response)
+            tx=data.get("result")
+            if not tx or not tx.get("meta") or tx["meta"].get("err"):continue
+            meta=tx["meta"]
+            message=tx["transaction"]["message"]
+            keys=[k.get("pubkey") if isinstance(k,dict) else k for k in message.get("accountKeys",[])]
+            pre={(b.get("accountIndex"),b.get("mint")):b for b in meta.get("preTokenBalances",[])}
+            post={(b.get("accountIndex"),b.get("mint")):b for b in meta.get("postTokenBalances",[])}
+            with lock:
+                watched=set(tokens)
+            for idx,mint in set(pre)|set(post):
+                if mint not in watched:continue
+                before=pre.get((idx,mint),{})
+                after=post.get((idx,mint),{})
+                owner=after.get("owner") or before.get("owner")
+                if not owner or owner not in keys:continue
+                def amount(b):
+                    return int(b.get("uiTokenAmount",{}).get("amount") or 0)
+                delta=amount(after)-amount(before)
+                if not delta:continue
+                owner_idx=keys.index(owner)
+                sol_before=meta.get("preBalances",[])
+                sol_after=meta.get("postBalances",[])
+                if owner_idx>=len(sol_before) or owner_idx>=len(sol_after):continue
+                sol_delta=(sol_after[owner_idx]-sol_before[owner_idx])/1e9
+                if delta>0 and sol_delta>=0:continue
+                if delta<0 and sol_delta<=0:continue
+                event={"txType":"buy" if delta>0 else "sell","mint":mint,
+                    "signature":sig+":"+str(idx),"traderPublicKey":owner,
+                    "solAmount":abs(sol_delta)}
+                with lock:
+                    token=tokens.get(mint)
+                    if token and update_trade(token,event,time.time()):
+                        status["trades"]+=1
+                        status["onchain_decoded_trades"]+=1
+        except Exception as ex:
+            with lock:
+                status["onchain_rpc_errors"]+=1
+                status["onchain_last_error"]=str(ex)[:180]
+        finally:
+            transaction_queue.task_done()
+
 def onchain_observer():
     """Observe real Pump.fun program transaction logs, without guessing trade details."""
     while not stopping.is_set():
@@ -130,6 +188,8 @@ def onchain_observer():
                     if value.get("err") is None and value.get("signature"):
                         with lock:
                             status["onchain_transactions_seen"]+=1
+                            try:transaction_queue.put_nowait(value["signature"])
+                            except queue.Full:pass
                             logs=value.get("logs") or []
                             if any("Instruction: Buy" in line for line in logs):
                                 status["onchain_buy_log_candidates"]+=1
@@ -155,6 +215,8 @@ async def lifespan(app):
     thread.start()
     observer=threading.Thread(target=onchain_observer,daemon=True)
     observer.start()
+    decoder=threading.Thread(target=transaction_decoder,daemon=True)
+    decoder.start()
     yield
     stopping.set()
     with lock:
