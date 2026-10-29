@@ -8,7 +8,7 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="solana-v1-transaction-fix"
+SCANNER_VERSION="solana-coverage-v1"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
 PRIVATE_RPC_CONFIGURED=bool(os.getenv("SOLANA_RPC_URL"))
@@ -23,7 +23,7 @@ lock=threading.RLock()
 tokens={}
 order=collections.deque()
 active=set()
-status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_buy_log_candidates":0,"onchain_sell_log_candidates":0,"onchain_decoded_trades":0,"onchain_rpc_errors":0,"onchain_rpc_rate_limited":0,"onchain_queue_dropped":0,"onchain_last_error":None,"onchain_last_message_at":None}
+status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_buy_log_candidates":0,"onchain_sell_log_candidates":0,"onchain_decoded_trades":0,"onchain_trade_mints":0,"onchain_rpc_errors":0,"onchain_rpc_rate_limited":0,"onchain_queue_dropped":0,"onchain_last_error":None,"onchain_last_message_at":None}
 stopping=threading.Event()
 ws_holder=[None]
 
@@ -149,8 +149,10 @@ def transaction_decoder():
             post={(b.get("accountIndex"),b.get("mint")):b for b in meta.get("postTokenBalances",[])}
             with lock:
                 watched=set(tokens)
+            matched_mints=set()
             for idx,mint in set(pre)|set(post):
                 if mint not in watched:continue
+                matched_mints.add(mint)
                 before=pre.get((idx,mint),{})
                 after=post.get((idx,mint),{})
                 owner=after.get("owner") or before.get("owner")
@@ -174,6 +176,8 @@ def transaction_decoder():
                     if token and update_trade(token,event,time.time()):
                         status["trades"]+=1
                         status["onchain_decoded_trades"]+=1
+            if matched_mints:
+                with lock:status["onchain_trade_mints"]+=len(matched_mints)
         except urllib.error.HTTPError as ex:
             with lock:
                 status["onchain_rpc_errors"]+=1
