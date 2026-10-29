@@ -8,7 +8,7 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="solana-observer-v2"
+SCANNER_VERSION="solana-observer-v3"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 PUMP_PROGRAM_ID="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 WINDOW=35
@@ -17,7 +17,7 @@ lock=threading.RLock()
 tokens={}
 order=collections.deque()
 active=set()
-status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_last_error":None,"onchain_last_message_at":None}
+status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_buy_log_candidates":0,"onchain_sell_log_candidates":0,"onchain_last_error":None,"onchain_last_message_at":None}
 stopping=threading.Event()
 ws_holder=[None]
 
@@ -130,6 +130,11 @@ def onchain_observer():
                     if value.get("err") is None and value.get("signature"):
                         with lock:
                             status["onchain_transactions_seen"]+=1
+                            logs=value.get("logs") or []
+                            if any("Instruction: Buy" in line for line in logs):
+                                status["onchain_buy_log_candidates"]+=1
+                            if any("Instruction: Sell" in line for line in logs):
+                                status["onchain_sell_log_candidates"]+=1
                             status["onchain_last_message_at"]=time.time()
             def error(ws,err):
                 with lock:status["onchain_last_error"]=str(err)[:180]
