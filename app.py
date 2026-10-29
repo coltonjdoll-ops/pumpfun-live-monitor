@@ -8,7 +8,7 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="research-scoring-v2"
+SCANNER_VERSION="early-watch-v1"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
 PRIVATE_RPC_CONFIGURED=bool(os.getenv("SOLANA_RPC_URL"))
@@ -348,9 +348,9 @@ def live(limit:int=Query(30,ge=1,le=200),mode:str="signals"):
     with lock:
         now=time.time()
         rows=[summary(tokens[m],now) for m in order if m in tokens and now-tokens[m].detected<180]
-        if mode=="signals":rows=[r for r in rows if r["classification"]=="EARLY SIGNAL"]
-        if mode=="building":rows=[r for r in rows if r["classification"] in ("EARLY SIGNAL","BUILDING")]
-        rows.sort(key=lambda r:(r["classification"]=="EARLY SIGNAL",r["score"],-r["age_seconds"]),reverse=True)
+        if mode=="signals":rows=[r for r in rows if r["classification"] in ("EARLY SIGNAL","EARLY WATCH")]
+        if mode=="building":rows=[r for r in rows if r["classification"] in ("EARLY SIGNAL","EARLY WATCH","BUILDING")]
+        rows.sort(key=lambda r:(r["classification"] in ("EARLY WATCH","EARLY SIGNAL"),r["score"],-r["age_seconds"]),reverse=True)
         return {"as_of":now,"feed_connected":status["connected"],"mode":mode,"count":len(rows),
                 "coins":rows[:limit],"disclaimer":"Observed partial feed; not financial advice or a trading signal."}
 
