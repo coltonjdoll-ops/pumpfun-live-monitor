@@ -8,7 +8,7 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="solana-coverage-v1"
+SCANNER_VERSION="solana-mint-stream-v1"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
 PRIVATE_RPC_CONFIGURED=bool(os.getenv("SOLANA_RPC_URL"))
@@ -23,7 +23,7 @@ lock=threading.RLock()
 tokens={}
 order=collections.deque()
 active=set()
-status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_buy_log_candidates":0,"onchain_sell_log_candidates":0,"onchain_decoded_trades":0,"onchain_trade_mints":0,"onchain_rpc_errors":0,"onchain_rpc_rate_limited":0,"onchain_queue_dropped":0,"onchain_last_error":None,"onchain_last_message_at":None}
+status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_buy_log_candidates":0,"onchain_sell_log_candidates":0,"onchain_decoded_trades":0,"onchain_trade_mints":0,"mint_stream_connected":False,"mint_stream_subscriptions":0,"mint_stream_notifications":0,"onchain_rpc_errors":0,"onchain_rpc_rate_limited":0,"onchain_queue_dropped":0,"onchain_last_error":None,"onchain_last_message_at":None}
 stopping=threading.Event()
 ws_holder=[None]
 
@@ -211,16 +211,8 @@ def onchain_observer():
                         with lock:
                             status["onchain_transactions_seen"]+=1
                             logs=value.get("logs") or []
-                            # RPC logs don't identify the traded mint reliably; skip duplicates
-                            # and avoid building an unbounded backlog of stale candidates.
-                            if any("Instruction: Buy" in line or "Instruction: Sell" in line for line in logs):
-                                signature=value["signature"]
-                                if signature not in seen_signatures:
-                                    seen_signatures.add(signature)
-                                    if len(seen_signatures)>10000:seen_signatures.clear()
-                                    try:transaction_queue.put_nowait(signature)
-                                    except queue.Full:status["onchain_queue_dropped"]+=1
-                            logs=value.get("logs") or []
+                            # Program-wide stream is for diagnostics only. Mint-specific
+                            # subscriptions below drive the RPC transaction decoder.
                             if any("Instruction: Buy" in line for line in logs):
                                 status["onchain_buy_log_candidates"]+=1
                             if any("Instruction: Sell" in line for line in logs):
@@ -238,6 +230,81 @@ def onchain_observer():
         with lock:status["onchain_connected"]=False
         stopping.wait(5)
 
+def mint_trade_observer():
+    """Subscribe to logs mentioning newly detected mint accounts.
+    This avoids fetching every transaction across the entire Pump.fun program.
+    """
+    while not stopping.is_set():
+        pending={}
+        subscriptions={}
+        request_id=100
+        try:
+            def opened(ws):
+                with lock:status["mint_stream_connected"]=True
+            def message(ws,raw):
+                data=json.loads(raw)
+                if data.get("id") in pending:
+                    mint=pending.pop(data["id"])
+                    if "result" in data and isinstance(data["result"],int):
+                        subscriptions[mint]=data["result"]
+                    elif "error" in data:
+                        with lock:status["onchain_last_error"]="Mint subscription: "+str(data["error"])[:130]
+                elif data.get("method")=="logsNotification":
+                    value=data.get("params",{}).get("result",{}).get("value",{})
+                    if value.get("err") is not None or not value.get("signature"):return
+                    logs=value.get("logs") or []
+                    if not any("Instruction: Buy" in x or "Instruction: Sell" in x for x in logs):return
+                    signature=value["signature"]
+                    with lock:
+                        status["mint_stream_notifications"]+=1
+                        if signature in seen_signatures:return
+                        seen_signatures.add(signature)
+                        if len(seen_signatures)>10000:seen_signatures.clear()
+                        try:transaction_queue.put_nowait(signature)
+                        except queue.Full:status["onchain_queue_dropped"]+=1
+            def error(ws,err):
+                with lock:status["onchain_last_error"]="Mint stream: "+str(err)[:140]
+            def closed(ws,code,reason):
+                with lock:status["mint_stream_connected"]=False
+            ws=websocket.WebSocketApp(SOLANA_WS_URL,on_open=opened,
+                on_message=message,on_error=error,on_close=closed)
+            def rotation():
+                nonlocal request_id
+                while not stopping.wait(2):
+                    with lock:
+                        if not status["mint_stream_connected"]:continue
+                        now=time.time()
+                        wanted=[]
+                        for mint in order:
+                            if mint in tokens and now-tokens[mint].detected<90:
+                                wanted.append(mint)
+                            if len(wanted)>=10:break
+                    try:
+                        for mint,subscription in list(subscriptions.items()):
+                            if mint not in wanted:
+                                request_id+=1
+                                ws.send(json.dumps({"jsonrpc":"2.0","id":request_id,
+                                    "method":"logsUnsubscribe","params":[subscription]}))
+                                subscriptions.pop(mint,None)
+                        for mint in wanted:
+                            if mint in subscriptions or mint in pending.values():continue
+                            request_id+=1
+                            pending[request_id]=mint
+                            ws.send(json.dumps({"jsonrpc":"2.0","id":request_id,
+                                "method":"logsSubscribe","params":[{"mentions":[mint]},
+                                {"commitment":"confirmed"}]}))
+                        with lock:status["mint_stream_subscriptions"]=len(subscriptions)
+                    except Exception as ex:
+                        with lock:status["onchain_last_error"]="Mint rotation: "+str(ex)[:140]
+            threading.Thread(target=rotation,daemon=True).start()
+            ws.run_forever(ping_interval=25,ping_timeout=10)
+        except Exception as ex:
+            with lock:status["onchain_last_error"]="Mint observer: "+str(ex)[:140]
+        with lock:
+            status["mint_stream_connected"]=False
+            status["mint_stream_subscriptions"]=0
+        stopping.wait(5)
+
 @asynccontextmanager
 async def lifespan(app):
     stopping.clear()
@@ -247,6 +314,8 @@ async def lifespan(app):
     observer.start()
     decoder=threading.Thread(target=transaction_decoder,daemon=True)
     decoder.start()
+    mint_observer=threading.Thread(target=mint_trade_observer,daemon=True)
+    mint_observer.start()
     yield
     stopping.set()
     with lock:
