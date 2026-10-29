@@ -7,14 +7,14 @@ from engine import Token,assess,update_trade,read_cap
 
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
-MAX_SUBS=5
+MAX_SUBS=25 if API_KEY else 5
 WINDOW=35
 MAX_TOKENS=1200
 lock=threading.RLock()
 tokens={}
 order=collections.deque()
 active=set()
-status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"up to five simultaneously subscribed tokens; incomplete"}
+status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier"}
 stopping=threading.Event()
 ws_holder=[None]
 
@@ -46,10 +46,11 @@ def ingest(e,ws):
             status["auth_status"]=str(e.get("status") or "unknown")
             status["auth_tier"]=str(e.get("tier") or "")[:40] or None
             if e.get("status")=="ok":
-                ws.send(json.dumps({"method":"subscribeNewToken"}))
+                status["last_error"]=None
                 rebalance(ws,now)
             else:
-                status["last_error"]="Feed authentication was not accepted: "+str(e.get("reason") or e.get("status"))[:100]
+                status["last_error"]="Feed authentication not accepted: "+str(e.get("reason") or e.get("status"))[:100]
+                rebalance(ws,now)
             return
         if e.get("type")=="error":
             status["last_error"]=str(e.get("message") or e.get("code") or e)[:180]
@@ -78,9 +79,12 @@ def feed_loop():
                 with lock:
                     ws_holder[0]=ws;status["connected"]=True;status["last_error"]=None
                     active.clear()
-                    status["auth_status"]="unverified" if API_KEY else "anonymous"
+                    status["auth_status"]="pending" if API_KEY else "anonymous"
                 ws.send(json.dumps({"method":"subscribeNewToken"}))
-                rebalance(ws,time.time())
+                if API_KEY:
+                    ws.send(json.dumps({"method":"auth","key":API_KEY}))
+                else:
+                    rebalance(ws,time.time())
             def message(ws,raw):
                 try:ingest(json.loads(raw),ws)
                 except Exception as ex:
@@ -94,7 +98,7 @@ def feed_loop():
                 while not stopping.wait(1):
                     with lock:
                         if ws_holder[0] is not ws:break
-                        if status["connected"]:
+                        if status["connected"] and status["auth_status"]!="pending":
                             rebalance(ws,time.time())
             threading.Thread(target=rotation,daemon=True).start()
             ws.run_forever(ping_interval=25,ping_timeout=10)
@@ -132,7 +136,7 @@ def summary(t,now):
 
 @app.get("/api/status")
 def get_status():
-    with lock:return {**status,"active_subscriptions":len(active),"tracked_tokens":len(tokens),"server_time":time.time(),
+    with lock:return {**status,"active_subscriptions":len(active),"subscription_limit":MAX_SUBS,"tracked_tokens":len(tokens),"server_time":time.time(),
        "limitations":["No complete trade coverage","No verified unique humans","No live X feed","No prediction guarantee"]}
 
 @app.get("/api/live")
@@ -180,7 +184,7 @@ async function refresh(){
  if(!s.ok||!r.ok)throw Error("Server returned an error");
  const st=await s.json(),d=await r.json();
  document.getElementById("status").textContent=(st.connected?"🟢 Feed connected":"🔴 Feed offline")+
- " | Launches: "+st.launches+" | Observed trades: "+st.trades+" | Active subscriptions: "+st.active_subscriptions+"/5"+
+ " | Launches: "+st.launches+" | Observed trades: "+st.trades+" | Active subscriptions: "+st.active_subscriptions+"/"+st.subscription_limit+
  (st.last_error?" | Error: "+st.last_error:"");
  document.getElementById("rows").innerHTML=d.coins.map(x=>`<tr><td>${Math.round(x.age_seconds)}s</td>
  <td><a target="_blank" rel="noopener noreferrer" href="${esc(x.pump_url)}">${esc(x.symbol||x.mint.slice(0,8))}</a></td>
