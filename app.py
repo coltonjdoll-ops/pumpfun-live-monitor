@@ -8,7 +8,7 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
-SCANNER_VERSION="solana-mint-stream-v1"
+SCANNER_VERSION="research-scoring-v2"
 SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
 SOLANA_RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
 PRIVATE_RPC_CONFIGURED=bool(os.getenv("SOLANA_RPC_URL"))
@@ -329,7 +329,7 @@ def summary(t,now):
     a=assess(t,now)
     return {"mint":t.mint,"symbol":t.symbol,"name":t.name,"creator":t.creator,
       "detected_at":t.detected,"age_seconds":round(a["age"],1),"classification":a["label"],
-      "score":a["score"],"observed_buys_30s":a["buys"],"observed_sells_30s":a["sells"],
+      "score":a["score"],"confidence":a["confidence"],"observed_buys_30s":a["buys"],"observed_sells_30s":a["sells"],
       "distinct_buying_wallets_30s":a["wallets"],"observed_sol_volume_30s":round(a["volume"],4),
       "volume_trade_samples":a["volume_samples"],
       "observed_market_cap_sol":t.last_cap,
