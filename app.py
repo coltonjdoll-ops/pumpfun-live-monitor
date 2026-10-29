@@ -78,12 +78,9 @@ def feed_loop():
                 with lock:
                     ws_holder[0]=ws;status["connected"]=True;status["last_error"]=None
                     active.clear()
-                    status["auth_status"]="pending" if API_KEY else "anonymous"
-                if API_KEY:
-                    ws.send(json.dumps({"method":"auth","key":API_KEY}))
-                else:
-                    ws.send(json.dumps({"method":"subscribeNewToken"}))
-                    rebalance(ws,time.time())
+                    status["auth_status"]="unverified" if API_KEY else "anonymous"
+                ws.send(json.dumps({"method":"subscribeNewToken"}))
+                rebalance(ws,time.time())
             def message(ws,raw):
                 try:ingest(json.loads(raw),ws)
                 except Exception as ex:
@@ -97,7 +94,7 @@ def feed_loop():
                 while not stopping.wait(1):
                     with lock:
                         if ws_holder[0] is not ws:break
-                        if status["auth_status"] in ("ok","anonymous"):
+                        if status["connected"]:
                             rebalance(ws,time.time())
             threading.Thread(target=rotation,daemon=True).start()
             ws.run_forever(ping_interval=25,ping_timeout=10)
