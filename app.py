@@ -8,13 +8,15 @@ from engine import Token,assess,update_trade,read_cap
 FEED = os.getenv("PUMP_FEED_URL") or "wss://pumpdev.io/ws"
 API_KEY = os.getenv("PUMPDEV_API_KEY", "").strip()
 MAX_SUBS=25 if API_KEY else 5
+SOLANA_WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
+PUMP_PROGRAM_ID="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 WINDOW=35
 MAX_TOKENS=1200
 lock=threading.RLock()
 tokens={}
 order=collections.deque()
 active=set()
-status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier"}
+status={"connected":False,"last_message_at":None,"last_error":None,"launches":0,"trades":0,"started_at":time.time(),"source":"wss://pumpdev.io/ws","auth_status":"pending","auth_tier":None,"reconnects":0,"coverage":"partial token-trade coverage; subscriptions limited by configured tier","onchain_connected":False,"onchain_transactions_seen":0,"onchain_last_error":None,"onchain_last_message_at":None}
 stopping=threading.Event()
 ws_holder=[None]
 
@@ -108,11 +110,45 @@ def feed_loop():
         if stopping.wait(delay):break
         delay=min(30,delay*1.5)
 
+def onchain_observer():
+    """Observe real Pump.fun program transaction logs, without guessing trade details."""
+    while not stopping.is_set():
+        try:
+            def opened(ws):
+                with lock:
+                    status["onchain_connected"]=True
+                    status["onchain_last_error"]=None
+                ws.send(json.dumps({"jsonrpc":"2.0","id":1,"method":"logsSubscribe",
+                    "params":[{"mentions":[PUMP_PROGRAM_ID]},{"commitment":"confirmed"}]}))
+            def message(ws,raw):
+                data=json.loads(raw)
+                if "error" in data:
+                    with lock:status["onchain_last_error"]=str(data["error"])[:180]
+                if data.get("method")=="logsNotification":
+                    value=data.get("params",{}).get("result",{}).get("value",{})
+                    if value.get("err") is None and value.get("signature"):
+                        with lock:
+                            status["onchain_transactions_seen"]+=1
+                            status["onchain_last_message_at"]=time.time()
+            def error(ws,err):
+                with lock:status["onchain_last_error"]=str(err)[:180]
+            def closed(ws,code,reason):
+                with lock:status["onchain_connected"]=False
+            client=websocket.WebSocketApp(SOLANA_WS_URL,on_open=opened,
+                on_message=message,on_error=error,on_close=closed)
+            client.run_forever(ping_interval=25,ping_timeout=10)
+        except Exception as ex:
+            with lock:status["onchain_last_error"]=str(ex)[:180]
+        with lock:status["onchain_connected"]=False
+        stopping.wait(5)
+
 @asynccontextmanager
 async def lifespan(app):
     stopping.clear()
     thread=threading.Thread(target=feed_loop,daemon=True)
     thread.start()
+    observer=threading.Thread(target=onchain_observer,daemon=True)
+    observer.start()
     yield
     stopping.set()
     with lock:
